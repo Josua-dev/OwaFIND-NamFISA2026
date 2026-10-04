@@ -23,6 +23,7 @@ export default function VerifyPage() {
   const [checks, setChecks] = useState<VerificationCheck[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [verifying, setVerifying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({
     full_name: '',
     national_id: '',
@@ -76,12 +77,13 @@ export default function VerifyPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!profile) return;
+    setError(null);
     setSubmitting(true);
 
     let bpId = bp?.id;
 
     if (!bp) {
-      const { data, error } = await supabase
+      const { data, error: insertError } = await supabase
         .from('beneficiary_profiles')
         .insert({
           user_id: profile.user_id,
@@ -97,14 +99,15 @@ export default function VerifyPage() {
         })
         .select()
         .single();
-      if (error) {
+      if (insertError) {
+        setError(insertError.message);
         setSubmitting(false);
         return;
       }
       bpId = data.id;
       setBp(data as BeneficiaryProfile);
     } else {
-      await supabase
+      const { error: updateError } = await supabase
         .from('beneficiary_profiles')
         .update({
           full_name: form.full_name,
@@ -118,6 +121,11 @@ export default function VerifyPage() {
           updated_at: new Date().toISOString(),
         })
         .eq('id', bp.id);
+      if (updateError) {
+        setError(updateError.message);
+        setSubmitting(false);
+        return;
+      }
     }
 
     // Log audit
@@ -131,19 +139,22 @@ export default function VerifyPage() {
     });
 
     setSubmitting(false);
-    // Automatically proceed to verification after saving
-    await runVerificationInternal(bpId as string | undefined);
+    await runVerificationInternal(bpId);
   };
 
   const runVerification = async () => {
     if (!bp || !profile) return;
+    setError(null);
     await runVerificationInternal(bp.id);
   };
 
   const runVerificationInternal = async (bpId?: string) => {
     if (!profile) return;
     const currentBpId = bpId ?? bp?.id;
-    if (!currentBpId) return;
+    if (!currentBpId) {
+      setError('Could not find your profile. Please try saving your information again.');
+      return;
+    }
     setVerifying(true);
 
     // Simulate demo identity verification
@@ -157,20 +168,30 @@ export default function VerifyPage() {
     ];
 
     for (const check of checksData) {
-      await supabase.from('verification_checks').insert({
+      const { error: checkError } = await supabase.from('verification_checks').insert({
         beneficiary_profile_id: currentBpId,
         check_type: check.check_type,
         status: check.status,
         provider: 'DEMO_IDENTITY_PROVIDER',
         result_detail: check.detail,
       });
+      if (checkError) {
+        setError(`Failed to save verification check: ${checkError.message}`);
+        setVerifying(false);
+        return;
+      }
     }
 
     // Update verification status
-    await supabase
+    const { error: statusError } = await supabase
       .from('beneficiary_profiles')
       .update({ verification_status: 'VERIFIED', updated_at: new Date().toISOString() })
       .eq('id', currentBpId);
+    if (statusError) {
+      setError(`Failed to update verification status: ${statusError.message}`);
+      setVerifying(false);
+      return;
+    }
 
     // Log audit
     await supabase.from('audit_logs').insert({
@@ -295,6 +316,12 @@ export default function VerifyPage() {
             </CardHeader>
             <CardContent>
               <form onSubmit={handleSubmit} className="space-y-4">
+                {error && (
+                  <div className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                    <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                    <span>{error}</span>
+                  </div>
+                )}
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="full_name">Full Name *</Label>
