@@ -39,6 +39,8 @@ export default function DiscoverPage() {
   const [currentStep, setCurrentStep] = useState(0);
   const [matches, setMatches] = useState<MatchWithDetails[]>([]);
   const [newMatchCount, setNewMatchCount] = useState(0);
+  const [institutionCount, setInstitutionCount] = useState(0);
+  const [recordCount, setRecordCount] = useState(0);
 
   useEffect(() => {
     if (!profile) return;
@@ -54,6 +56,16 @@ export default function DiscoverPage() {
       .eq('user_id', profile.user_id)
       .maybeSingle();
     setBp(bpData as BeneficiaryProfile | null);
+
+    const { count: instCount } = await supabase
+      .from('institutions')
+      .select('*', { count: 'exact', head: true });
+    setInstitutionCount(instCount ?? 0);
+
+    const { count: recCount } = await supabase
+      .from('benefit_records')
+      .select('*', { count: 'exact', head: true });
+    setRecordCount(recCount ?? 0);
 
     if (bpData) {
       const { data: existingMatches } = await supabase
@@ -76,11 +88,7 @@ export default function DiscoverPage() {
       await new Promise((r) => setTimeout(r, discoverySteps[i].duration));
     }
 
-    // Run matching against all benefit records
-    const { data: allRecords } = await supabase
-      .from('benefit_records')
-      .select('*');
-
+    // Get existing match record IDs to skip
     const { data: existingMatches } = await supabase
       .from('matches')
       .select('benefit_record_id')
@@ -88,8 +96,24 @@ export default function DiscoverPage() {
 
     const existingRecordIds = new Set((existingMatches ?? []).map((m: any) => m.benefit_record_id));
     let newCount = 0;
+    const matchInserts: any[] = [];
 
-    for (const record of (allRecords ?? []) as BenefitRecord[]) {
+    const batchSize = 1000;
+    let offset = 0;
+    let allRecords: BenefitRecord[] = [];
+
+    while (true) {
+      const { data: batch } = await supabase
+        .from('benefit_records')
+        .select('*')
+        .range(offset, offset + batchSize - 1);
+      if (!batch || batch.length === 0) break;
+      allRecords = allRecords.concat(batch as BenefitRecord[]);
+      if (batch.length < batchSize) break;
+      offset += batchSize;
+    }
+
+    for (const record of allRecords) {
       if (existingRecordIds.has(record.id)) continue;
 
       const result = calculateMatch(
@@ -114,23 +138,28 @@ export default function DiscoverPage() {
       );
 
       if (result.score >= 0.35) {
-        const { data: matchData } = await supabase
-          .from('matches')
-          .insert({
-            beneficiary_profile_id: bp.id,
-            benefit_record_id: record.id,
-            institution_id: record.institution_id,
-            score: result.score,
-            classification: result.classification,
-            status: 'PENDING',
-            signals: JSON.parse(JSON.stringify(result.signals)),
-          })
-          .select(`*, benefit_records (*), benefit_types (*), institutions (*)`)
-          .single();
+        matchInserts.push({
+          beneficiary_profile_id: bp.id,
+          benefit_record_id: record.id,
+          institution_id: record.institution_id,
+          score: result.score,
+          classification: result.classification,
+          status: 'PENDING',
+          signals: JSON.parse(JSON.stringify(result.signals)),
+        });
+      }
+    }
 
-        if (matchData) {
-          newCount++;
-        }
+    // Batch insert matches
+    const insertBatchSize = 500;
+    for (let i = 0; i < matchInserts.length; i += insertBatchSize) {
+      const batch = matchInserts.slice(i, i + insertBatchSize);
+      const { data: inserted } = await supabase
+        .from('matches')
+        .insert(batch)
+        .select(`*, benefit_records (*), benefit_types (*), institutions (*)`);
+      if (inserted) {
+        newCount += inserted.length;
       }
     }
 
@@ -251,7 +280,7 @@ export default function DiscoverPage() {
                 </div>
                 <h3 className="mt-4 font-display text-xl font-semibold">Ready to Search</h3>
                 <p className="mt-2 text-sm text-muted-foreground max-w-md">
-                  We will search across {5} participating institutions and compare your information against {20}+ benefit records using our matching engine.
+                  We will search across {institutionCount} participating institutions and compare your information against {recordCount.toLocaleString()} benefit records using our matching engine.
                 </p>
                 <Button onClick={runDiscovery} size="lg" className="mt-6">
                   Start Benefit Discovery
